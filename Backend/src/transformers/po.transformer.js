@@ -11,21 +11,13 @@ export const poTransformer = {
   async transform({ xml, id, intent, filters }) {
     const rows = await parseODataAtomXml(xml);
 
-    // ✅ Case 1: Only PO list
     if (intent === "SHOW_PO") {
       let headers = buildHeaderList(rows);
       headers = applyHeaderFilters(headers, filters);
 
-      // pagination
       const skip = Math.max(0, Number(filters?.skip || 0));
-
-      // default "last 20"
       const defaultTake = Number(process.env.PO_LIST_TAKE || 20);
-
-      // If user says "show all po" you can map that in router to limit=20,
-      // but transformer still enforces a safe default.
       const take = Math.max(1, Number(filters?.limit || defaultTake));
-
       const page = headers.slice(skip, skip + take);
 
       return {
@@ -40,7 +32,6 @@ export const poTransformer = {
       };
     }
 
-    // ✅ Case 2+: PO Details split by intent
     const details = buildPoDetails(rows, id);
 
     switch (intent) {
@@ -54,25 +45,49 @@ export const poTransformer = {
         return { po_header: details.po_header };
 
       case "SHOW_PO_ITEMS":
-        return { items: details.items };
+        return {
+          items: details.items.map((x) => ({
+            item: x.item,
+            quantity: x.quantity,
+            pricing: x.pricing,   // ✅ add this to satisfy pricing.net_price
+            delivery: x.delivery, // ✅ add if your UI reads delivery_date too
+          })),
+        };
+
+      case "SHOW_PO_PLANTS": {
+        const plants = [
+          ...new Set(
+            (details.items || [])
+              .map((x) => x?.item?.plant)
+              .filter(Boolean)
+          ),
+        ];
+        return { plants };
+      }
 
       case "SHOW_PO_PRICING":
-        return {
-          pricing: details.items.map((i) => i.pricing),
-        };
+        return { pricing: details.items.map((i) => i.pricing) };
 
       case "SHOW_PO_DELIVERY":
-        return {
-          delivery: details.items.map((i) => i.delivery),
-        };
+        return { delivery: details.items.map((i) => i.delivery) };
 
       case "SHOW_PO_ACCOUNTING":
-        return {
-          accounting: details.items.map((i) => i.accounting),
-        };
+        return { accounting: details.items.map((i) => i.accounting) };
+      
+      case "SHOW_PO_STORAGE_LOCATIONS": {
+        const storage_locations = [
+          ...new Set(
+            (details.items || [])
+              .map((x) => x?.item?.storage_location)
+              .filter(Boolean)
+          ),
+        ];
+        return { storage_locations };
+      }
 
       default:
-        return details; // fallback
+        // ✅ IMPORTANT: return full details so FIELD intents can pickPaths()
+        return details;
     }
   },
 };
@@ -109,7 +124,6 @@ function applyHeaderFilters(headers, filters) {
 
   let out = headers;
 
-  // ✅ Month filter
   if (filters.monthOnly) {
     out = out.filter((h) => {
       const d = h.doc_date || h.created_on;
@@ -118,7 +132,6 @@ function applyHeaderFilters(headers, filters) {
     });
   }
 
-  // ✅ Date range filter
   if (filters.docDateFrom && filters.docDateTo) {
     out = out.filter((h) => {
       const d = h.doc_date || h.created_on;
@@ -127,38 +140,44 @@ function applyHeaderFilters(headers, filters) {
     });
   }
 
-  // ✅ CREATED BY filter
   if (filters.createdBy) {
     out = out.filter((h) => {
       if (!h.created_by) return false;
-      return h.created_by.toLowerCase().includes(String(filters.createdBy).toLowerCase());
+      return h.created_by
+        .toLowerCase()
+        .includes(String(filters.createdBy).toLowerCase());
     });
   }
 
-  // ✅ VENDOR filter
   if (filters.vendorId) {
     out = out.filter((h) => String(h.vendor_id || "") === String(filters.vendorId));
   }
 
-  // ✅ STATUS filter
   if (filters.status) {
-    out = out.filter((h) => String(h.status || "").toLowerCase().includes(String(filters.status).toLowerCase()));
+    out = out.filter((h) =>
+      String(h.status || "")
+        .toLowerCase()
+        .includes(String(filters.status).toLowerCase())
+    );
   }
 
   return out;
 }
 
-// ----- existing details logic unchanged -----
 function buildPoDetails(rows, poNo) {
   const filtered = rows.filter((r) => String(r.PoNo) === String(poNo));
   const first = filtered[0] || null;
+  
 
   const out = {
     po_header: {
       po_no: poNo || first?.PoNo || null,
-      company_code: first?.CompanyCode || null,
+      company_code: first?.CompanyCode || null, 
+      doc_catg: first?.PoDocCatg || null,
       doc_type: first?.PoDocType || null,
       po_org: first?.PoOrg || null,
+      payment_terms: first?.TermsPymntKey || null,
+      discount_days: num(first?.DicountDays), 
       po_group: first?.PoGrp || null,
       currency: first?.CurKey || null,
       exchange_rate: first?.ExcngRate || null,
@@ -167,9 +186,7 @@ function buildPoDetails(rows, poNo) {
       created_by: first?.UserCreated || null,
       payment_terms: first?.TermsPymntKey || null,
     },
-    vendor: {
-      vendor_id: first?.SuppAcoutNo || null,
-    },
+    vendor: { vendor_id: first?.SuppAcoutNo || null },
     status_info: {
       status: first?.Status || null,
       purchasing_doc_pr_st: first?.PurchasingDocPrSt || null,
@@ -185,19 +202,9 @@ function buildPoDetails(rows, poNo) {
         storage_location: r.StrLoc || null,
         mat_group: r.MatGrp || null,
       },
-      quantity: {
-        ordered: num(r.Menge),
-        unit: r.UnitOfMeasure || null,
-      },
-      pricing: {
-        net_price: num(r.NetPrice),
-        price_unit: num(r.PriceUnit),
-        currency: r.CurKey || null,
-      },
-      delivery: {
-        delivery_date: toISODate(r.ItemDeliDt),
-        schedule: r.DeliverySchedule || null,
-      },
+      quantity: { ordered: num(r.Menge), unit: r.UnitOfMeasure || null },
+      pricing: { net_price: num(r.NetPrice), price_unit: num(r.PriceUnit), currency: r.CurKey || null },
+      delivery: { delivery_date: toISODate(r.ItemDeliDt), schedule: r.DeliverySchedule || null },
       accounting: {
         cost_center: r.CostCenter || null,
         gl_account: r.GlActNo || null,
@@ -213,14 +220,8 @@ function buildPoDetails(rows, poNo) {
 
 function computeSummary(structured) {
   const items = structured.items || [];
-  const prices = items
-    .map((x) => x?.pricing?.net_price)
-    .filter((v) => typeof v === "number");
-
-  const dates = items
-    .map((x) => x?.delivery?.delivery_date)
-    .filter(Boolean)
-    .sort();
+  const prices = items.map((x) => x?.pricing?.net_price).filter((v) => typeof v === "number");
+  const dates = items.map((x) => x?.delivery?.delivery_date).filter(Boolean).sort();
 
   return {
     net_price_min: prices.length ? Math.min(...prices) : null,

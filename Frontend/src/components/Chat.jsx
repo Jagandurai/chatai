@@ -17,9 +17,6 @@ import {
   FiMic,
   FiMicOff,
   FiSend,
-  FiPlus,
-  FiMenu,
-  FiX,
   FiEdit2,
   FiCopy,
   FiSquare,
@@ -779,15 +776,7 @@ export default function Chat() {
                     </button>
                   )}
                 </div>
- 
-                {/* <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 px-1 text-xs text-zinc-600">
-                  <span>Enter to send</span>
-                  <span>•</span>
-                  <span>Shift+Enter for newline</span>
-                  <span>•</span>
-                  <span>Esc cancels edit</span>
-                </div> */}
- 
+
                 {!supported && (
                   <div className="mt-2 px-1 text-xs text-amber-300">
                     Voice input not supported in this browser. Try Chrome / Edge.

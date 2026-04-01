@@ -16,8 +16,24 @@ const ALLOWED_INTENTS = [
   "SHOW_PO_PRICING",
   "SHOW_PO_DELIVERY",
   "SHOW_PO_VENDOR",
+  "SHOW_PO_COMPANY_CODE",
+  "SHOW_PO_DOC_TYPE",
+  "SHOW_PO_CURRENCY",
+  "SHOW_PO_EXCHANGE_RATE",
+  "SHOW_PO_PURCH_ORG",
+  "SHOW_PO_PURCH_GROUP",
+  "SHOW_PO_DOC_CATEGORY",
+  "SHOW_PO_SUPPLIER",
+  "SHOW_PO_PAYMENT_TERMS",
+  "SHOW_PO_DISCOUNT_DAYS",
   "CREATED_BY",
   "CREATED_DATE",
+  "SHOW_PO_MATERIALS",
+  "SHOW_PO_PLANTS",
+  "SHOW_PO_STORAGE_LOCATIONS",
+  "SHOW_PO_MATERIAL_GROUPS",
+  "SHOW_PO_QUANTITIES",
+  "SHOW_PO_ORDER_PRICE_UNITS",
   "PRICE_INFO",
   "DELIVERY_INFO",
   "VENDOR_INFO",
@@ -26,7 +42,41 @@ const ALLOWED_INTENTS = [
 // Don’t allow huge pasted text to go to the router LLM
 const MAX_ROUTER_MESSAGE_CHARS = Number(process.env.LLM_ROUTER_MAX_CHARS || 2000);
 
-// If LLM fails, choose a sensible default
+// ---------- DATE HELPERS (for today/yesterday/last week) ----------
+function isoUTCDateOnly(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+    .toISOString()
+    .slice(0, 10);
+}
+
+function addDaysUTC(date, days) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
+function rangeTodayUTC() {
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const s = isoUTCDateOnly(today);
+  return { docDateFrom: s, docDateTo: s };
+}
+
+function rangeYesterdayUTC() {
+  const now = new Date();
+  const y = addDaysUTC(now, -1);
+  const s = isoUTCDateOnly(y);
+  return { docDateFrom: s, docDateTo: s };
+}
+
+// Interprets "last week" as last 7 days INCLUDING today
+function rangeLast7DaysUTC() {
+  const now = new Date();
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const from = addDaysUTC(to, -6);
+  return { docDateFrom: isoUTCDateOnly(from), docDateTo: isoUTCDateOnly(to) };
+}
+
 function fallbackRouteFromText(msg) {
   const id = extractDocNumber(msg);
   const filters = extractListFilters(msg);
@@ -53,22 +103,18 @@ export async function routeMessage({ message }) {
   console.log("[router] msg.length =", msg.length);
   console.log("[router] rule.confident =", rule.confident, "rule.route =", rule.route);
 
-  // 1) fast path: rule-based
   if (rule.confident) return rule.route;
 
-  // 2) protect LLM from huge pasted content
   if (msg.length > MAX_ROUTER_MESSAGE_CHARS) {
     return fallbackRouteFromText(msg);
   }
 
-  // 3) LLM fallback (but safe)
   console.log("[router] calling ollama...");
 
   let llmRoute;
   try {
     llmRoute = await routeWithOllama(msg);
   } catch (e) {
-    // LLM timeout/invalid/etc -> fallback without hanging the user
     console.warn("[router] ollama routing failed, using fallback:", e?.message || e);
     return fallbackRouteFromText(msg);
   }
@@ -80,8 +126,6 @@ export async function routeMessage({ message }) {
     filters: llmRoute.filters || null,
   };
 
-  // If LLM says SHOW_PO but there is an id in the user text, prefer details.
-  // (also protects against weak LLM outputs)
   const idFromText = extractDocNumber(msg);
   if (!merged.id && idFromText) merged.id = idFromText;
 
@@ -100,8 +144,176 @@ function routeByRules(message) {
   const id = extractDocNumber(message);
   const filters = extractListFilters(message);
 
+  // ✅ PO LIST by relative date (today/yesterday/last week) + optional user
+  // Examples:
+  // - "Give the details of PO created today"
+  // - "Give me the list of PO created by user IRAM today"
+  if (
+    !id &&
+    /\b(po|purchase\s*order|purchase\s*orders)\b/.test(m) &&
+    /\b(created|created\s+on|po\s+created|created\s+date)\b/.test(m) &&
+    /\b(today|yesterday|last\s+week)\b/.test(m)
+  ) {
+    let dateRange = null;
+
+    if (/\btoday\b/.test(m)) dateRange = rangeTodayUTC();
+    else if (/\byesterday\b/.test(m)) dateRange = rangeYesterdayUTC();
+    else if (/\blast\s+week\b/.test(m)) dateRange = rangeLast7DaysUTC();
+
+    // support "created by user IRAM today" OR "user IRAM today"
+    const createdByMatch =
+      message.match(/\bcreated\s+by\s+user\s+([a-zA-Z0-9_]+)/i) ||
+      message.match(/\bcreated\s+by\s+([a-zA-Z0-9_]+)/i) ||
+      message.match(/\buser\s+([a-zA-Z0-9_]+)\b/i);
+
+    const createdBy = createdByMatch?.[1] ? createdByMatch[1] : null;
+
+    return {
+      confident: true,
+      route: {
+        entity: "PO",
+        intent: "SHOW_PO",
+        id: null,
+        filters: {
+          ...(filters || {}),
+          ...(dateRange || {}),
+          ...(createdBy ? { createdBy } : {}),
+        },
+      },
+    };
+  }
+
+  // ✅ COMPANY CODE (narrow field)
+  if (id && /\b(company\s*code|bukrs)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_COMPANY_CODE", id },
+    };
+  }
+
+  // ✅ PURCHASE ORGANIZATION (EKORG / PoOrg)
+  if (
+    id &&
+    /\b(purchase\s+organisation|purchase\s+organization|purchasing\s+organisation|purchasing\s+organization|purch\s*org|purchasing\s*org|po\s*org|ekorg)\b/.test(
+      m
+    )
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PURCH_ORG", id },
+    };
+  }
+
+  // ✅ CURRENCY (WAERS / CurKey)
+  if (id && /\b(currency|cur\s*key|currency\s*key|waers)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_CURRENCY", id },
+    };
+  }
+
+  // ✅ EXCHANGE RATE (KURSF / ExcngRate)
+  if (id && /\b(exchange\s*rate|exch\s*rate|fx\s*rate|rate|kursf)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_EXCHANGE_RATE", id },
+    };
+  }
+
+  // ✅ PURCHASE DOCUMENT TYPE (BSART / PoDocType)
+  if (
+    id &&
+    /\b(purchase\s+document\s+type|purchase\s+doc\s+type|po\s*doc\s*type|document\s+type|doc\s*type|doctype|bsart)\b/.test(
+      m
+    )
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_DOC_TYPE", id },
+    };
+  }
+
+  // ✅ PURCHASE DOCUMENT CATEGORY (PoDocCatg)
+  if (
+    id &&
+    /\b(purchase\s+document\s+category|document\s+category|doc\s*category|po\s*doc\s*catg|po\s*doc\s*category|category)\b/.test(
+      m
+    )
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_DOC_CATEGORY", id },
+    };
+  }
+
+  // ✅ SUPPLIER / SUPPLIER ACCOUNT NUMBER (SuppAcoutNo)
+  if (
+    id &&
+    /\b(supplier\s+account\s+number|supplier\s+account|supplier|vendor\s+account|suppacoutno)\b/.test(
+      m
+    )
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_SUPPLIER", id },
+    };
+  }
+
+  // ✅ MATERIAL NUMBERS
+  if (id && /\b(material\s+number|material\s+no|mat\s*no)\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_MATERIALS", id } };
+  }
+
+  // ✅ PLANT
+  if (id && /\bplant\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_PLANTS", id } };
+  }
+
+  // ✅ STORAGE LOCATION
+  if (id && /\b(storage\s+details|storage\s+location|str\s*loc|strloc)\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_STORAGE_LOCATIONS", id } };
+  }
+
+  // ✅ MATERIAL GROUPS
+  if (id && /\b(material\s+group|mat\s*grp)\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_MATERIAL_GROUPS", id } };
+  }
+
+  // ✅ QUANTITIES
+  if (id && /\b(scheduled\s+quantity|quantity|qty|menge)\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_QUANTITIES", id } };
+  }
+
+  // ✅ ORDER PRICE UNIT
+  if (id && /\b(order\s+price\s+unit|price\s+unit\s*\(purchasing\)|odpriceunit)\b/.test(m)) {
+    return { confident: true, route: { entity: "PO", intent: "SHOW_PO_ORDER_PRICE_UNITS", id } };
+  }
+
+  // ✅ TERMS OF PAYMENT (TermsPymntKey)
+  if (id && /\b(terms\s+of\s+payment|payment\s+terms|terms\s+payment|term\s+key|termspymntkey)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PAYMENT_TERMS", id },
+    };
+  }
+
+  // ✅ DISCOUNT DAYS (DicountDays)
+  if (id && /\b(discount\s+days|dicountdays)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_DISCOUNT_DAYS", id },
+    };
+  }
+
+  // ✅ PURCHASE GROUP (EKGRP / PoGrp)
+  if (id && /\b(purchase\s+group|purchasing\s+group|purch\s*group|po\s*group|ekgrp)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PURCH_GROUP", id },
+    };
+  }
+
   // ✅ DETAILS (+ common misspellings)
-  // covers: details/detail/full/complete + detials/deteils/detailes
   if (id && /\b(detail|details|detials|deteils|detailes|full|complete|entire)\b/.test(m)) {
     return {
       confident: true,
@@ -171,7 +383,7 @@ function routeByRules(message) {
     };
   }
 
-  // CREATED BY / CREATED DATE / etc. (existing)
+  // CREATED BY / CREATED DATE / etc.
   if (id && /\b(who\s+created|created\s+by)\b/.test(m)) {
     return { confident: true, route: { entity: "PO", intent: "CREATED_BY", id } };
   }
@@ -206,15 +418,21 @@ function extractListFilters(message) {
   const m = String(message || "").toLowerCase();
   const filters = {};
 
-  // --- Relative time phrases: last month / this month ---
+  // ✅ relative date filters
+  if (/\btoday\b/.test(m)) {
+    Object.assign(filters, rangeTodayUTC());
+  } else if (/\byesterday\b/.test(m)) {
+    Object.assign(filters, rangeYesterdayUTC());
+  } else if (/\blast\s+week\b/.test(m)) {
+    Object.assign(filters, rangeLast7DaysUTC());
+  }
+
   if (/\blast\s+month\b/.test(m)) {
     const now = new Date();
     const y = now.getUTCFullYear();
-    const mon = now.getUTCMonth() + 1; // 1..12
-
+    const mon = now.getUTCMonth() + 1;
     const prevMon = mon === 1 ? 12 : mon - 1;
     const prevYear = mon === 1 ? y - 1 : y;
-
     const { start, end } = monthStartEndUTC(prevYear, prevMon);
     filters.docDateFrom = toYyyyMmDd(start);
     filters.docDateTo = toYyyyMmDd(end);
@@ -227,7 +445,6 @@ function extractListFilters(message) {
     filters.docDateTo = toYyyyMmDd(end);
   }
 
-  // month/year parsing (jan 2026, year 2019, etc.)
   const my = parseMonthYearFromText(message);
   if (my) {
     const { month, year } = my;
@@ -241,7 +458,6 @@ function extractListFilters(message) {
     } else if (!month && year) {
       const start = new Date(Date.UTC(year, 0, 1));
       const end = new Date(Date.UTC(year, 11, 31, 23, 59, 59));
-
       filters.docDateFrom = toYyyyMmDd(start);
       filters.docDateTo = toYyyyMmDd(end);
     }
@@ -253,8 +469,10 @@ function extractListFilters(message) {
     filters.docDateTo = toYyyyMmDd(range.end);
   }
 
-  // FIX: createdBy should not capture the word vendor/supplier
-  const createdBy = message.match(/\bcreated\s+by\s+([a-zA-Z0-9_]+)/i);
+  const createdBy =
+    message.match(/\bcreated\s+by\s+user\s+([a-zA-Z0-9_]+)/i) ||
+    message.match(/\bcreated\s+by\s+([a-zA-Z0-9_]+)/i);
+
   if (createdBy && createdBy[1]) {
     const val = createdBy[1];
     if (!/^(vendor|supplier)$/i.test(val)) {
@@ -262,7 +480,6 @@ function extractListFilters(message) {
     }
   }
 
-  // vendor id like "vendor 17300001"
   const vendor = message.match(/\b(vendor|supplier)\s+(\d{4,12})\b/i);
   if (vendor && vendor[2]) filters.vendorId = vendor[2];
 
@@ -283,7 +500,6 @@ function mergeFilters(a, b) {
 }
 
 // ------------------- OLLAMA -------------------
-
 async function routeWithOllama(message) {
   const prompt = buildPrompt(message);
   console.log("[router] prompt.length =", prompt.length);
@@ -291,8 +507,8 @@ async function routeWithOllama(message) {
   const url = process.env.OLLAMA_URL || "http://localhost:11434/api/generate";
   const model = process.env.OLLAMA_MODEL || "llama3:latest";
 
-  // Make routing fast (don’t allow it to run for minutes)
-  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS || 8000); // try 8000ms first
+  // routing timeout (keep low; fallbackRouteFromText will handle failures)
+  const timeoutMs = Number(process.env.LLM_TIMEOUT_MS || 8000);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -306,15 +522,12 @@ async function routeWithOllama(message) {
         model,
         prompt,
         stream: false,
-
-        // ✅ These options are the key for speed
         options: {
           temperature: 0,
-          num_predict: 128,          // routing JSON is tiny
+          num_predict: Number(process.env.LLM_ROUTER_NUM_PREDICT || 128),
           top_p: 0.9,
           top_k: 20,
           repeat_penalty: 1.05,
-          // stop as soon as JSON object ends (prevents extra text)
           stop: ["}\n", "}\r\n", "}"],
         },
       }),
@@ -347,16 +560,17 @@ Return ONLY JSON.
 Schema:
 {
   "entity":"PO|PR|VENDOR",
-  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO",
+  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|SHOW_PO_COMPANY_CODE|SHOW_PO_DOC_TYPE|SHOW_PO_CURRENCY|SHOW_PO_EXCHANGE_RATE|SHOW_PO_PURCH_ORG|SHOW_PO_PURCH_GROUP|SHOW_PO_DOC_CATEGORY|SHOW_PO_SUPPLIER|SHOW_PO_PAYMENT_TERMS|SHOW_PO_DISCOUNT_DAYS|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO|SHOW_PO_MATERIALS|SHOW_PO_PLANTS|SHOW_PO_STORAGE_LOCATIONS|SHOW_PO_MATERIAL_GROUPS|SHOW_PO_QUANTITIES|SHOW_PO_ORDER_PRICE_UNITS",
   "id":"string or null",
   "filters":{...} or null
 }
 
 Rules:
-- If a 10-digit number is present and the message mentions PO/purchase order, set entity="PO" and id to that number.
-- Prefer SHOW_PO_DETAILS when user asks for details/full/complete info.
-- Prefer SHOW_PO_VENDOR/STATUS/ITEMS/PRICING/DELIVERY when those words appear.
+- If the message asks for company code/BUKRS of a PO, use intent SHOW_PO_COMPANY_CODE.
+- If a 10-digit PO number is present, set entity="PO" and id.
+- Prefer narrow intents (company code/vendor/status/items/pricing/delivery) when asked; otherwise SHOW_PO_DETAILS.
 - If no id, SHOW_PO (list).
+- If user asks for created today/yesterday/last week, use SHOW_PO with filters.
 
 User message:
 ${JSON.stringify(message)}
