@@ -105,7 +105,11 @@ Delivery: ${del.delivery_date || "N/A"}
   // 5. PRICING
   else if (data?.data?.pricing) {
     msg = data.data.pricing
-      .map((p, i) => `Item ${i + 1}: Price ${p.net_price ?? "N/A"} ${p.currency || ""}`)
+      .map((p) => {
+        const poItem = p.po_item || "N/A";              // e.g., "00005"
+        const displayItem = String(poItem).replace(/^0+/, "") || poItem; // "5" (optional)
+        return `Item ${displayItem}: Price ${p.net_price ?? "N/A"} ${p.currency || ""}`;
+      })
       .join("\n");
   }
 
@@ -129,12 +133,15 @@ Currency: ${d.po_header.currency}
 Items: ${d.summary?.item_count}
     `.trim();
   }
+  // 8b. ERROR inside data
+  else if (data?.data?.error) {
+    msg = data.data.error;
+  }
 
-  // 8. ERROR
+  // 8. ERROR (top-level)
   else if (data?.error) {
     msg = data.error;
   }
-
   // 9. FINAL FALLBACK
   else {
     msg = "No readable response from server";
@@ -143,6 +150,45 @@ Items: ${d.summary?.item_count}
   if (!res.ok || data?.ok === false) {
     throw new Error(msg);
   }
+  else if (data?.data?.measures) {
+  // Build structured rows so the UI does NOT need to split reply text (prevents Item 1 being dropped)
+  const measuresRows = data.data.measures.map((r) => {
+    const item = String(r.po_item || "N/A").replace(/^0+/, "") || r.po_item;
+
+    const parts = [];
+
+    if ("gross_weight" in r) {
+      const unit = r.weight_unit || "";
+      parts.push(`Gross weight: ${r.gross_weight ?? "N/A"}${unit ? " " + unit : ""}`);
+    }
+
+    if ("net_weight" in r) {
+      const unit = r.weight_unit || "";
+      parts.push(`Net weight: ${r.net_weight ?? "N/A"}${unit ? " " + unit : ""}`);
+    }
+
+    // Volume (VOLUM) + Volume unit (VOL_UNIT)
+    if ("volume" in r) {
+      const unit = r.volume_unit || "";
+      parts.push(`Volume: ${r.volume ?? "N/A"}${unit ? " " + unit : ""}`);
+    } else if ("volume_unit" in r) {
+      parts.push(`Volume unit: ${r.volume_unit ?? "N/A"}`);
+    }
+
+    // Material type (MatType)
+    if ("mat_type" in r && r.mat_type != null && String(r.mat_type).trim() !== "") {
+      parts.push(`Material type: ${r.mat_type}`);
+    }
+
+    return {
+      item,
+      text: `Item ${item} -> ${parts.length ? parts.join(" | ") : "No result found"}`,
+      raw: r,
+    };
+  });
+
+  // Reply string for chat bubble
+  msg = measuresRows.map((x) => x.text).join("\n");
 
   return {
     ok: true,
@@ -150,5 +196,15 @@ Items: ${d.summary?.item_count}
     data: data?.data ?? null,
     meta: data?.meta ?? null,
     raw: data,
+    measuresRows, // ✅ UI should render table from this array to avoid dropping first row
   };
+}
+
+return {
+  ok: true,
+  reply: msg,
+  data: data?.data ?? null,
+  meta: data?.meta ?? null,
+  raw: data,
+};
 }

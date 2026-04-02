@@ -17,7 +17,11 @@ export const entityRouterService = {
     if (!intentDef) throw new ApiError(400, `Unsupported intent "${intent}" for entity "${entity}".`);
 
     // LIST mode does not require id
-    if (intentDef.mode !== "LIST" && !id) {
+    const requiresId =
+    typeof intentDef.requiresId === "boolean"
+      ? intentDef.requiresId
+      : intentDef.mode !== "LIST"; // default: LIST=false, others=true
+    if (requiresId && !id) {
       throw new ApiError(400, `id is required for intent "${intent}" (entity "${entity}").`);
     }
 

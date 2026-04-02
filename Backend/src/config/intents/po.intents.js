@@ -9,6 +9,7 @@ export const poIntents = {
   // ✅ LIST
   SHOW_PO: {
     mode: "LIST",
+    requiresId: false,
     paths: ["headers"],
   },
 
@@ -77,6 +78,21 @@ export const poIntents = {
       `PO ${id} purchase document category is ${data["po_header.doc_catg"] || "N/A"}.`,
   },
 
+  SHOW_PO_PROFIT_CENTER: {
+    mode: "FIELD",
+    requiresId: true,
+    paths: ["profit_center"],
+    template: ({ id, data }) => {
+      const v = (data?.profit_center || "").trim();
+      return v ? `Profit center for PO ${id}: ${v}` : `No result found for profit center in PO ${id}`;
+    },
+  },
+
+  SHOW_PO_MEASURES: {
+    mode: "DETAIL",
+    requiresId: true,
+  },
+
 
   // ✅ SUPPLIER ACCOUNT NUMBER (one-line)
   SHOW_PO_SUPPLIER: {
@@ -93,18 +109,30 @@ export const poIntents = {
     paths: ["items"],
   },
 
-  // ✅ PLANTS (all items)
+    // ✅ PLANTS (all items)
   SHOW_PO_PLANTS: {
     mode: "DETAIL",
-    paths: ["items"],
+    paths: ["plants"],
   },
 
-  // ✅ STORAGE LOCATIONS (all items)
   SHOW_PO_STORAGE_LOCATIONS: {
     mode: "DETAIL",
-    paths: ["items"],
+    paths: ["storage_locations"],
   },
 
+  SHOW_PO_TAX_CODE: {
+    mode: "FIELD",
+    requiresId: true,
+    paths: ["tax_code"],
+    template: ({ id, data }) => `Tax code for PO ${id}: ${data?.tax_code ?? "N/A"}`,
+  },
+
+  COUNT_PO: {
+    mode: "FIELD",
+    requiresId: false,
+    paths: ["count"],
+    template: ({ data }) => `PO count: ${data["count"] ?? 0}`,
+  },
   // ✅ MATERIAL GROUPS (all items)
   SHOW_PO_MATERIAL_GROUPS: {
     mode: "DETAIL",
