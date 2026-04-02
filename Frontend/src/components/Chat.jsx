@@ -17,6 +17,9 @@ import {
   FiMic,
   FiMicOff,
   FiSend,
+  FiPlus,
+  FiMenu,
+  FiX,
   FiEdit2,
   FiCopy,
   FiSquare,
@@ -70,10 +73,10 @@ export default function Chat() {
       updatedAt: Date.now(),
     },
   ]);
- 
   const [activeId, setActiveId] = useState("default");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const [editingChatId, setEditingChatId] = useState(null);
   const [editingTitle, setEditingTitle] = useState("");
  
@@ -632,7 +635,17 @@ export default function Chat() {
           </header>
  
           {/* Messages */}
-          <section className="flex-1 overflow-y-auto px-4 py-6 pt-4 pb-28 overscroll-contain">
+          
+          <section
+            className="flex-1 overflow-y-auto px-4 py-6 pt-4 pb-28 overscroll-contain"
+            onScroll={(e) => {
+              const el = e.target;
+              const isNearBottom =
+                el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+
+              setShowScrollDown(!isNearBottom);
+            }}
+          >
             <div className="mx-auto max-w-4xl space-y-4">
               {activeConv?.messages?.map((m, idx) => {
                 const isUser = m.role === "user";
@@ -724,6 +737,16 @@ export default function Chat() {
               <div ref={bottomRef} />
             </div>
           </section>
+          {showScrollDown && (
+          <button
+            onClick={() =>
+              bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+            }
+            className="fixed bottom-28 right-6 bg-white border border-gray-300 hover:bg-gray-100 text-zinc-700 p-3 rounded-full shadow-md transition"
+          >
+            ↓
+          </button>
+        )}
  
           {/* Composer */}
           <footer className="sticky bottom-0 bg-white px-4 py-3 border-t border-gray-200">
@@ -776,7 +799,15 @@ export default function Chat() {
                     </button>
                   )}
                 </div>
-
+ 
+                {/* <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 px-1 text-xs text-zinc-600">
+                  <span>Enter to send</span>
+                  <span>•</span>
+                  <span>Shift+Enter for newline</span>
+                  <span>•</span>
+                  <span>Esc cancels edit</span>
+                </div> */}
+ 
                 {!supported && (
                   <div className="mt-2 px-1 text-xs text-amber-300">
                     Voice input not supported in this browser. Try Chrome / Edge.
