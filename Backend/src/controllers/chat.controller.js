@@ -126,6 +126,8 @@ export async function chatController(req, res, next) {
     }
     const result = await entityRouterService.handle(routed);
 
+    
+
     // 3) Save list state AFTER successful list response
     if (routed?.entity === "PO" && routed?.intent === "SHOW_PO") {
       // Store original filters but remove paging so "next" is consistent

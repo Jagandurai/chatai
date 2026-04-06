@@ -13,8 +13,15 @@ export const poTransformer = {
 
     // LIST: PO list (with paging + filters)
     if (intent === "SHOW_PO") {
-      let headers = buildHeaderList(rows);
-      headers = applyHeaderFilters(headers, filters);
+      
+    let headers = buildHeaderList(rows);
+
+    console.log("filters.companyCode =", filters?.companyCode);
+    console.log("sample header (before filter) =", headers[0]);
+    console.log("sample header company_code =", headers[0]?.company_code);
+    console.log("sample row keys =", Object.keys(rows[0] || {})); // ✅ important
+
+    headers = applyHeaderFilters(headers, filters);
 
       const skip = Math.max(0, Number(filters?.skip || 0));
       const defaultTake = Number(process.env.PO_LIST_TAKE || 20);
@@ -53,15 +60,54 @@ export const poTransformer = {
         return { po_header: details.po_header };
 
       // Items (kept full for frontend compatibility)
-      case "SHOW_PO_ITEMS":
+      case "SHOW_PO_ITEMS": {
+        const poItem = filters?.poItem ? String(filters.poItem) : null;
+
+        let items = details.items || [];
+        if (poItem) {
+          items = items.filter((x) => String(x?.item?.po_item) === poItem);
+        }
+
+        if (poItem && items.length === 0) {
+          return { error: `PO item ${poItem} not found in PO ${id}` };
+        }
+
         return {
-          items: details.items.map((x) => ({
+          items: items.map((x) => ({
             item: x.item,
             quantity: x.quantity,
             pricing: x.pricing,
             delivery: x.delivery,
           })),
         };
+      }
+
+      case "SHOW_PO_ITEM_DETAILS": {
+        const poItem = filters?.poItem ? String(filters.poItem) : null;
+        if (!poItem) return { error: "poItem is required" };
+
+        const item = (details.items || []).find((x) => String(x?.item?.po_item) === poItem);
+
+        if (!item) {
+          return { error: `PO item ${poItem} not found in PO ${id}` };
+        }
+
+        return {
+          item: {
+            po_item: item?.item?.po_item ?? null,
+            short_text: item?.item?.short_text ?? null,          // TXZ01
+            material: item?.item?.material ?? null,              // MATNR
+            storage_location: item?.item?.storage_location ?? null, // LGORT_D
+            mat_group: item?.item?.mat_group ?? null,            // material grp
+            quantity: item?.quantity?.ordered ?? null,           // MENGE
+            quantity_unit: item?.quantity?.unit ?? null,
+            net_price: item?.pricing?.net_price ?? null,
+            currency: item?.pricing?.currency ?? null,
+            price_unit: item?.pricing?.price_unit ?? null,
+            plant: item?.item?.plant ?? null,
+          },
+        };
+      }
 
       // Unique plants
       case "SHOW_PO_PLANTS": {
@@ -74,7 +120,6 @@ export const poTransformer = {
         ];
         return { plants };
       }
-
 
       case "SHOW_PO_PROFIT_CENTER":
         return { 
@@ -93,7 +138,20 @@ export const poTransformer = {
         return { storage_locations };
       }
 
-      case "SHOW_PO_MEASURES": {
+      case "COUNT_PO_ITEMS": {
+        const filtered = rows.filter((r) => String(r.PoNo) === String(id));
+
+        // count unique PoItem (e.g., 00001..00009)
+        const uniqueItems = new Set(
+          filtered
+            .map((r) => (r.PoItem ? String(r.PoItem).trim() : ""))
+            .filter(Boolean)
+        );
+
+        return { count: uniqueItems.size };
+      }
+
+     case "SHOW_PO_MEASURES": {
         const fields = Array.isArray(filters?.fields) ? filters.fields : null;
         const want = (k) => !fields || fields.includes(k);
 
@@ -102,19 +160,23 @@ export const poTransformer = {
             const out = {
               po_item: x?.item?.po_item,
               material: x?.item?.material,
-              mat_type: x?.mat_type ?? null,           // ✅ add
-              weight_unit: x?.measures?.weight_unit ?? null,
             };
+
+            if (want("MAT_TYPE")) out.mat_type = x?.mat_type ?? null;
 
             if (want("NET_WEIGHT")) out.net_weight = x?.measures?.net_weight ?? null;
             if (want("GROSS_WEIGHT")) out.gross_weight = x?.measures?.gross_weight ?? null;
+
             if (want("VOLUME")) out.volume = x?.measures?.volume ?? null;
-            // include unit if they asked volume OR asked unit
-            if (want("VOLUME") || want("VOL_UNIT")) {
+
+            if (want("VOL_UNIT") || want("VOLUME")) {
               out.volume_unit = x?.measures?.volume_unit ?? null;
             }
 
-            out.volume_unit = x?.measures?.volume_unit ?? null;
+            // keep weight unit only if weight requested
+            if (want("NET_WEIGHT") || want("GROSS_WEIGHT")) {
+              out.weight_unit = x?.measures?.weight_unit ?? null;
+            }
 
             return out;
           }),
@@ -150,7 +212,22 @@ export const poTransformer = {
           })),
         };
       }
-      
+      case "SHOW_PO_PR_ONLY": {
+        const filtered = rows.filter((r) => String(r.PoNo) === String(id));
+
+        return {
+          pr: filtered.map((r) => ({
+            po_item: r.PoItem ? String(r.PoItem).trim() : null,
+            pr_number: r.PrNo ? String(r.PrNo).trim() : null,
+            pr_item: r.PrItem ? String(r.PrItem).trim() : null,
+
+            // ✅ Name for the PR item line (choose what you want to show)
+            name: r.ShortText ? String(r.ShortText).trim() : null,  // e.g., "BKR-200 Frame"
+            material: r.MatNo ? String(r.MatNo).trim() : null,      // optional
+          })),
+        };
+      }
+            
       case "SHOW_PO_TAX_CODE":
         return { tax_code: details.po_header.purchase_cd_tax };
 
@@ -178,6 +255,7 @@ function buildHeaderList(rows) {
       byPo.set(po, {
         po_no: po,
         created_on: toISODate(r.CrtDate || r.PoDocDate),
+        company_code: r.CompanyCode ? String(r.CompanyCode).trim() : null, // ✅ ADD
         doc_date: toISODate(r.PoDocDate),
         created_by: r.UserCreated || null,
         vendor_id: r.SuppAcoutNo || null,
@@ -198,6 +276,10 @@ function applyHeaderFilters(headers, filters) {
   if (!filters) return headers;
 
   let out = headers;
+  if (filters.companyCode) {
+    const cc = String(filters.companyCode).trim();
+    out = out.filter((h) => String(h.company_code || "").trim() === cc);
+  }
 
   if (filters.monthOnly) {
     out = out.filter((h) => {
@@ -240,6 +322,7 @@ function applyHeaderFilters(headers, filters) {
 
   return out;
 }
+
 function buildPoDetails(rows, poNo) {
   const filtered = rows.filter((r) => String(r.PoNo) === String(poNo));
   const first = filtered[0] || null;
@@ -281,6 +364,11 @@ function buildPoDetails(rows, poNo) {
         storage_location: r.StrLoc || null,
         mat_group: r.MatGrp || null,
       },
+      pr: {
+        pr_number: r.PrNo ? String(r.PrNo).trim() : null,
+        pr_item: r.PrItem ? String(r.PrItem).trim() : null,
+      },
+
 
       // ✅ ADDED: weights/volume + units (per item)
       measures: {

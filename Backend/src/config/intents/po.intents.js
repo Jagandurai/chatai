@@ -10,19 +10,75 @@ export const poIntents = {
   SHOW_PO: {
     mode: "LIST",
     requiresId: false,
-    paths: ["headers"],
+    template: ({ data, filters }) => {
+      const total = data?.page?.totalMatched ?? data?.count ?? 0;
+      const returned = data?.page?.returned ?? data?.count ?? 0;
+      const cc = filters?.companyCode ? ` for company code ${filters.companyCode}` : "";
+      const more = data?.page?.hasMore ? " Say 'next 10' to see more." : "";
+      return `Founded ${total} POs${cc}.`;
+    },
+  },
+  // ✅ PR number + PR item only (related to PO)
+  SHOW_PO_PR_ONLY: {
+    mode: "DETAIL",      // or FIELD if your UI prefers
+    requiresId: true,
+    paths: ["pr"],
+    template: ({ id, data }) => {
+      const pr = data?.pr || [];
+      if (!pr.length) return `No PR found for PO ${id}.`;
+
+      const header = `PR details for PO ${id}:`;
+      const lines = pr.map((x, idx) => {
+        const poItem = x?.po_item || "N/A";
+        const name = x?.name || x?.material || "N/A";
+        const prNo = x?.pr_number || "N/A";
+        const prItem = x?.pr_item || "N/A";
+        return `${String(idx + 1).padStart(2, "0")}. PO item ${poItem} | ${name} | PR: ${prNo} | PR item: ${prItem}`;
+      });
+
+      return [header, ...lines].join("\n");
+    },
   },
 
   // ✅ FULL DETAILS
   SHOW_PO_DETAILS: {
     mode: "DETAIL",
     paths: ["po_header", "vendor", "status_info", "items", "summary"],
+    template: ({ id, data }) => {
+      const cc = data?.po_header?.company_code ?? "N/A";
+      const vendor = data?.vendor?.vendor_id ?? "N/A";
+      const cur = data?.po_header?.currency ?? "N/A";
+      const createdOn = data?.po_header?.created_on ?? "N/A";
+      const itemCount = data?.summary?.item_count ?? (data?.items?.length ?? 0);
+      return `PO ${id}: company code ${cc}, vendor ${vendor}, currency ${cur}, created on ${createdOn}, items ${itemCount}.`;
+    },
   },
-
   // ✅ ONLY ITEMS
   SHOW_PO_ITEMS: {
     mode: "DETAIL",
     paths: ["items"],
+  },
+
+  SHOW_PO_ITEM_DETAILS: {
+    mode: "FIELD",
+    requiresId: true,
+    paths: ["item"],
+    template: ({ id, data }) => {
+      const x = data?.item || {};
+      return (
+        `Material no: ${x.material ?? "N/A"} (MATNR), ` +
+        `Plant: ${x.plant ?? "N/A"} (WERKS), ` +
+        `Storage Locn: ${x.storage_location ?? "N/A"} (LGORT), ` +
+        `Material grp: ${x.mat_group ?? "N/A"} (MATKL), ` +
+        `Quantity: ${x.quantity ?? "N/A"} ${x.quantity_unit ?? ""} (MENGE)`
+      );
+    },
+  },
+  COUNT_PO_ITEMS: {
+    mode: "FIELD",
+    requiresId: true,
+    paths: ["count"],
+    template: ({ id, data }) => `PO ${id} has ${data["count"] ?? 0} item(s).`,
   },
 
   // ✅ COMPANY CODE (one-line)

@@ -39,6 +39,8 @@ const ALLOWED_INTENTS = [
   "VENDOR_INFO",
   "COUNT_PO",
   "SHOW_PO_MEASURES",
+  "SHOW_PO_ITEM_DETAILS",
+  "SHOW_PO_PR_ONLY",
 ];
 
 // Don’t allow huge pasted text to go to the router LLM
@@ -152,9 +154,9 @@ function rangeLastNDaysUTC(n) {
 function extractPoItemNumber(message) {
   const m = String(message || "").toLowerCase();
 
-  // matches: "item 05", "item 5", "po item 00005", "line item 10"
-  const match =
-    m.match(/\b(po\s*item|item|line\s*item|line)\s*[:#-]?\s*(\d{1,5})\b/i);
+  const match = m.match(
+    /\b(po\s*item|item|line\s*item|line)\s*[:#\-()]?\s*(\d{1,5})\b/i
+  );
 
   const raw = match?.[2];
   if (!raw) return null;
@@ -162,15 +164,14 @@ function extractPoItemNumber(message) {
   const digits = String(raw).replace(/\D/g, "");
   if (!digits) return null;
 
-  return digits.padStart(5, "0"); // 5-digit SAP item like 00005
+  return digits.padStart(5, "0");
 }
-
 
 
 
 // ------------------- RULE-BASED -------------------
 function routeByRules(message) {
-  const m = message.toLowerCase();
+  const m = String(message || "").toLowerCase();
 
   const id = extractDocNumber(message);
   let filters = extractListFilters(message);
@@ -178,8 +179,36 @@ function routeByRules(message) {
   // ✅ Set created-date field only for "created" questions
   if (/\b(created|were\s+created|created\s+on|created\s+date)\b/.test(m)) {
     filters = { ...(filters || {}), dateField: "CREATED_ON" };
-  }
 
+  }
+  // ✅ COUNT items in a specific PO (must be before COUNT_PO)
+  if (
+    id &&
+    /\b(how\s+many|count|number\s+of)\b/.test(m) &&
+    /\b(items?|line\s*items?)\b/.test(m)
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "COUNT_PO_ITEMS", id, filters: null },
+    };
+  }
+  // ✅ List POs by company code
+  if (/\b(list|show)\b/.test(m) && /\b(po|pos|purchase\s*orders?)\b/.test(m) && /\bcompany\s*code\b/.test(m)) {
+    const companyCodeMatch = m.match(/\bcompany\s*code\s*(?:is|=)?\s*(\d{3,4})\b/);
+    const companyCode = companyCodeMatch ? companyCodeMatch[1] : null;
+
+    if (companyCode) {
+      return {
+        confident: true,
+        route: {
+          entity: "PO",
+          intent: "SHOW_PO",
+          id: null,
+          filters: { companyCode }, // ✅
+        },
+      };
+    }
+  }
   // ✅ COUNT must come early so it isn't shadowed by list rules
   if (
     /\b(how\s+many|count|number\s+of)\b/.test(m) &&
@@ -191,28 +220,10 @@ function routeByRules(message) {
       route: { entity: "PO", intent: "COUNT_PO", id: null, filters: filters || null },
     };
   }
-  // ✅ WEIGHTS / VOLUME (per PO item)
-  if (/\b(net\s*weight|gross\s*weight|brgew|ntgew|volume|volum|weights?)\b/.test(m)) {
-    const poNo = extractDocNumber(message);
-    if (!poNo) {
-      return { confident: false, route: null };
-    }
 
-    const fields = extractMeasureFields(message);
-    const poItem = extractPoItemNumber(message);
-
-    const filters = {
-      ...(poItem ? { poItem } : null),
-      ...(fields.length ? { fields } : null),
-    };
-
-    return {
-      confident: true,
-      route: { entity: "PO", intent: "SHOW_PO_MEASURES", id: poNo, filters },
-    };
-  }
-  // ✅ NET PRICE / PRICING (optionally by item number)
-  if (id && /\b(net\s*price|pricing|price\s*info|price)\b/.test(m)) {
+  // ✅ PRICING / NET PRICE (optionally by item number)
+  // Put this BEFORE measures so "pricing details" doesn't get misrouted.
+  if (id && /\b(pricing\s*details?|pricing|net\s*price|price\s*unit|price\s*info|currency|conditions?)\b/.test(m)) {
     const poItem = extractPoItemNumber(message);
     const pricingFilters = poItem ? { poItem } : null;
 
@@ -221,7 +232,41 @@ function routeByRules(message) {
       route: { entity: "PO", intent: "SHOW_PO_PRICING", id, filters: pricingFilters },
     };
   }
+  if (id && /\b(pricing\s*procedure|procedure)\b/.test(m)) {
+    return { confident: true, route: { entity:"PO", intent:"SHOW_PO_PRICING_PROCEDURE", id, filters:null } };
+  }
+  // ✅ PR number + PR item related to a PO
+  if (id && /\b(purchase\s*requisition|requisition|pr\b|pr\s*(number|no)?|pr\s*item)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PR_ONLY", id, filters: null },
+    };
+  }
 
+  // ✅ WEIGHTS / VOLUME / VOLUME UNIT / MATERIAL TYPE (per PO item)
+  if (
+    /\b(net\s*weight|gross\s*weight|brgew|ntgew|volume\s*unit|vol\s*unit|volunit|volume|volum|material\s*type|mat\s*type|mattype)\b/.test(m)
+  ) {
+    const poNo = extractDocNumber(message);
+    if (!poNo) return { confident: false, route: null };
+
+    const fields = extractMeasureFields(message);
+    const poItem = extractPoItemNumber(message);
+
+    // ✅ If it matched this rule but we couldn't extract any specific field,
+    // default to MAT_TYPE (safer than returning EVERYTHING)
+    const finalFields = fields.length ? fields : ["MAT_TYPE"];
+
+    const measureFilters = {
+      ...(poItem ? { poItem } : null),
+      fields: finalFields,
+    };
+
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_MEASURES", id: poNo, filters: measureFilters },
+    };
+  }
   // ✅ TAX CODE / Tax on sales/purchases
   if (
     id &&
@@ -405,7 +450,25 @@ function routeByRules(message) {
       route: { entity: "PO", intent: "SHOW_PO_PURCH_GROUP", id },
     };
   }
+  
+    // ✅ PO ITEM DETAILS (single item)
+  if (/\b(details?\s+of\s+(po\s*)?item|item\s+details?|material\s+details?\s+of\s+item)\b/.test(m)) {
+    const poNo = extractDocNumber(message);
+    if (!poNo) return { confident: false, route: null };
 
+    const poItem = extractPoItemNumber(message);
+    if (!poItem) return { confident: false, route: null };
+
+    return {
+      confident: true,
+      route: {
+        entity: "PO",
+        intent: "SHOW_PO_ITEM_DETAILS",   // ✅ use the single-item intent
+        id: poNo,
+        filters: { poItem },
+      },
+    };
+  }
   // ✅ DETAILS (+ common misspellings)
   if (id && /\b(detail|details|detials|deteils|detailes|full|complete|entire)\b/.test(m)) {
     return {
@@ -513,21 +576,21 @@ function extractMeasureFields(message) {
   const m = String(message || "").toLowerCase();
   const fields = new Set();
 
+  const askedMatType = /\b(material\s*type|mat\s*type|mattype)\b/.test(m);
+  const askedNet = /\b(net\s*weight|ntgew)\b/.test(m);
+  const askedGross = /\b(gross\s*weight|brgew)\b/.test(m);
   const askedVolUnit = /\b(volume\s*unit|vol\s*unit|volunit)\b/.test(m);
   const askedVolume = /\b(volume|volum)\b/.test(m);
+  const askedWeightGeneric = /\bweights?\b/.test(m);
 
-  if (/\b(net\s*weight|ntgew)\b/.test(m)) fields.add("NET_WEIGHT");
-  if (/\b(gross\s*weight|brgew)\b/.test(m)) fields.add("GROSS_WEIGHT");
+  if (askedMatType) fields.add("MAT_TYPE");
+  if (askedNet) fields.add("NET_WEIGHT");
+  if (askedGross) fields.add("GROSS_WEIGHT");
 
-  // If user asked "volume unit", return VOL_UNIT (and DO NOT force VOLUME)
-  if (askedVolUnit) {
-    fields.add("VOL_UNIT");
-  } else if (askedVolume) {
-    fields.add("VOLUME");
-  }
+  if (askedVolUnit) fields.add("VOL_UNIT");
+  else if (askedVolume) fields.add("VOLUME");
 
-  // If user asked "weights" without specifying net/gross
-  if (/\b(weight|weights)\b/.test(m) && !fields.has("NET_WEIGHT") && !fields.has("GROSS_WEIGHT")) {
+  if (askedWeightGeneric && !askedNet && !askedGross) {
     fields.add("NET_WEIGHT");
     fields.add("GROSS_WEIGHT");
   }
@@ -696,7 +759,6 @@ async function routeWithOllama(message) {
     clearTimeout(timer);
   }
 }
-
 function buildPrompt(message) {
   return `
 Return ONLY JSON.
@@ -704,7 +766,7 @@ Return ONLY JSON.
 Schema:
 {
   "entity":"PO|PR|VENDOR",
-  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|SHOW_PO_COMPANY_CODE|SHOW_PO_DOC_TYPE|SHOW_PO_CURRENCY|SHOW_PO_EXCHANGE_RATE|SHOW_PO_PURCH_ORG|SHOW_PO_PURCH_GROUP|SHOW_PO_DOC_CATEGORY|SHOW_PO_SUPPLIER|SHOW_PO_PAYMENT_TERMS|SHOW_PO_DISCOUNT_DAYS|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO|SHOW_PO_MATERIALS|SHOW_PO_PLANTS|SHOW_PO_STORAGE_LOCATIONS|SHOW_PO_MATERIAL_GROUPS|SHOW_PO_QUANTITIES|SHOW_PO_ORDER_PRICE_UNITS|COUNT_PO",
+  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|SHOW_PO_COMPANY_CODE|SHOW_PO_DOC_TYPE|SHOW_PO_CURRENCY|SHOW_PO_EXCHANGE_RATE|SHOW_PO_PURCH_ORG|SHOW_PO_PURCH_GROUP|SHOW_PO_DOC_CATEGORY|SHOW_PO_SUPPLIER|SHOW_PO_PAYMENT_TERMS|SHOW_PO_DISCOUNT_DAYS|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO|SHOW_PO_MATERIALS|SHOW_PO_PLANTS|SHOW_PO_STORAGE_LOCATIONS|SHOW_PO_MATERIAL_GROUPS|SHOW_PO_QUANTITIES|SHOW_PO_ORDER_PRICE_UNITS|COUNT_PO|SHOW_PO_MEASURES|SHOW_PO_PR_ONLY",
   "id":"string or null",
   "filters":{...} or null
 }
