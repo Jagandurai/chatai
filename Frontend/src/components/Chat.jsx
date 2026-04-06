@@ -635,14 +635,22 @@ export default function Chat() {
           </header>
  
           {/* Messages */}
+<<<<<<< HEAD
+          
+=======
          
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
           <section
             className="flex-1 overflow-y-auto px-4 py-6 pt-4 pb-28 overscroll-contain"
             onScroll={(e) => {
               const el = e.target;
               const isNearBottom =
                 el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+<<<<<<< HEAD
+
+=======
  
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
               setShowScrollDown(!isNearBottom);
             }}
           >
@@ -821,4 +829,7 @@ export default function Chat() {
     </div>
   );
 }
+<<<<<<< HEAD
+=======
  
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
