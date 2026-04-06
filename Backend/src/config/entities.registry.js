@@ -14,16 +14,18 @@ export const entityRegistry = {
   PO: {
     service: poService,
     transformer: poTransformer,
-    intents: poIntents,
+    intents: poIntents, // ✅ SHOW_PO_PR_ONLY must be added inside poIntents
   },
-//   PR: {
-//     service: prService,
-//     transformer: prTransformer,
-//     intents: prIntents,
-//   },
-//   VENDOR: {
-//     service: vendorService,
-//     transformer: vendorTransformer,
-//     intents: vendorIntents,
-//   },
+
+  // PR: {
+  //   service: prService,
+  //   transformer: prTransformer,
+  //   intents: prIntents,
+  // },
+
+  // VENDOR: {
+  //   service: vendorService,
+  //   transformer: vendorTransformer,
+  //   intents: vendorIntents,
+  // },
 };

@@ -43,6 +43,7 @@ export async function sendChatMessage(message, opts = {}) {
     const intent = String(data.intent || "").toUpperCase();
 
     if (intent === "SHOW_PO_ITEMS") {
+<<<<<<< HEAD
       msg = items
         .map((row, i) => {
           const it = row?.item || {};
@@ -58,6 +59,37 @@ Mat Group: ${it.mat_group || "N/A"}
         })
         .join("\n----------------\n");
     } else {
+=======
+        msg = items
+          .map((row, i) => {
+            const it = row?.item || {};
+            return `
+  Item ${i + 1}
+  PO Item: ${it.po_item || "N/A"}
+  Material: ${it.material || "N/A"}
+  Text: ${it.short_text || "N/A"}
+  Plant: ${it.plant || "N/A"}
+  Storage: ${it.storage_location || "N/A"}
+  Mat Group: ${it.mat_group || "N/A"}
+            `.trim();
+          })
+          .join("\n----------------\n");
+      }
+      else if (data?.data?.item) {
+    const x = data.data.item;
+    msg =
+      `Item ${x.po_item}\n` +
+      `Short text: ${x.short_text ?? "N/A"}\n` +
+      `Material: ${x.material ?? "N/A"}\n` +
+      `Storage location: ${x.storage_location ?? "N/A"}\n` +
+      `Material group: ${x.mat_group ?? "N/A"}\n` +
+      `Quantity: ${x.quantity ?? "N/A"} ${x.quantity_unit ?? ""}`.trim() + "\n" +
+      `Net price: ${x.net_price ?? "N/A"} ${x.currency ?? ""}`.trim();
+  }
+
+    // ✅ Other intents (e.g., SHOW_PO_DETAILS): show full item info safely
+    else {
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
       msg = items
         .map((row, i) => {
           const it = row?.item || {};
@@ -84,10 +116,18 @@ Delivery: ${del.delivery_date || "N/A"}
       .join("\n");
   } else if (data?.data?.pricing) {
     msg = data.data.pricing
+<<<<<<< HEAD
       .map(
         (p, i) =>
           `Item ${i + 1}: Price ${p.net_price ?? "N/A"} ${p.currency || ""}`
       )
+=======
+      .map((p) => {
+        const poItem = p.po_item || "N/A";              // e.g., "00005"
+        const displayItem = String(poItem).replace(/^0+/, "") || poItem; // "5" (optional)
+        return `Item ${displayItem}: Price ${p.net_price ?? "N/A"} ${p.currency || ""}`;
+      })
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
       .join("\n");
   } else if (data?.data?.accounting) {
     msg = data.data.accounting
@@ -107,14 +147,78 @@ Vendor: ${d.vendor?.vendor_id}
 Currency: ${d.po_header.currency}
 Items: ${d.summary?.item_count}
     `.trim();
+<<<<<<< HEAD
   } else if (data?.error) {
     msg = data.error;
   } else {
+=======
+  }
+  // 8b. ERROR inside data
+  else if (data?.data?.error) {
+    msg = data.data.error;
+  }
+
+  // 8. ERROR (top-level)
+  else if (data?.error) {
+    msg = data.error;
+  }
+  // 9. FINAL FALLBACK
+  else {
+>>>>>>> 290ccdfd80c6b4ddda179cee82d2f5563e9488cf
     msg = "No readable response from server";
   }
 
   if (!res.ok || data?.ok === false) {
     throw new Error(msg);
+  }
+  else if (data?.data?.measures) {
+    // Build structured rows so the UI does NOT need to split reply text (prevents Item 1 being dropped)
+    const measuresRows = data.data.measures.map((r) => {
+      const item = String(r.po_item || "N/A").replace(/^0+/, "") || r.po_item;
+
+      const parts = [];
+
+      if ("gross_weight" in r) {
+        const unit = r.weight_unit || "";
+        parts.push(`Gross weight: ${r.gross_weight ?? "N/A"}${unit ? " " + unit : ""}`);
+      }
+
+      if ("net_weight" in r) {
+        const unit = r.weight_unit || "";
+        parts.push(`Net weight: ${r.net_weight ?? "N/A"}${unit ? " " + unit : ""}`);
+      }
+
+      // Volume (VOLUM) + Volume unit (VOL_UNIT)
+      if ("volume" in r) {
+        const unit = r.volume_unit || "";
+        parts.push(`Volume: ${r.volume ?? "N/A"}${unit ? " " + unit : ""}`);
+      } else if ("volume_unit" in r) {
+        parts.push(`Volume unit: ${r.volume_unit ?? "N/A"}`);
+      }
+
+      // Material type (MatType)
+      if ("mat_type" in r && r.mat_type != null && String(r.mat_type).trim() !== "") {
+        parts.push(`Material type: ${r.mat_type}`);
+      }
+
+      return {
+        item,
+        text: `Item ${item} -> ${parts.length ? parts.join(" | ") : "No result found"}`,
+        raw: r,
+      };
+    });
+
+    // Reply string for chat bubble
+    msg = measuresRows.map((x) => x.text).join("\n");
+
+    return {
+      ok: true,
+      reply: msg,
+      data: data?.data ?? null,
+      meta: data?.meta ?? null,
+      raw: data,
+      measuresRows, // ✅ UI should render table from this array to avoid dropping first row
+    };
   }
 
   return {

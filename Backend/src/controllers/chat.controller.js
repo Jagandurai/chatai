@@ -107,11 +107,14 @@ export async function chatController(req, res, next) {
 
     // 2) Normal routing
     const routed = await routeMessage({ message });
-
-    // If it's a PO list, ensure skip/limit defaults
-    if (routed?.entity === "PO" && routed?.intent === "SHOW_PO") {
+    
+    // ensure filters exists for SHOW_PO / COUNT_PO
+    if (routed?.entity === "PO" && (routed?.intent === "SHOW_PO" || routed?.intent === "COUNT_PO")) {
       routed.filters = routed.filters || null;
+    }
 
+    // apply paging defaults ONLY for SHOW_PO
+    if (routed?.entity === "PO" && routed?.intent === "SHOW_PO") {
       const take = Number(routed.filters?.limit || 10);
       const skip = Number(routed.filters?.skip || 0);
 
@@ -121,8 +124,9 @@ export async function chatController(req, res, next) {
         skip: Number.isFinite(skip) ? skip : 0,
       };
     }
-
     const result = await entityRouterService.handle(routed);
+
+    
 
     // 3) Save list state AFTER successful list response
     if (routed?.entity === "PO" && routed?.intent === "SHOW_PO") {

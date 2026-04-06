@@ -37,6 +37,10 @@ const ALLOWED_INTENTS = [
   "PRICE_INFO",
   "DELIVERY_INFO",
   "VENDOR_INFO",
+  "COUNT_PO",
+  "SHOW_PO_MEASURES",
+  "SHOW_PO_ITEM_DETAILS",
+  "SHOW_PO_PR_ONLY",
 ];
 
 // Don’t allow huge pasted text to go to the router LLM
@@ -91,10 +95,11 @@ function fallbackRouteFromText(msg) {
   validateRoute(route);
   return route;
 }
-
+console.log("[router] routeByRules loaded version = COUNT_PO_ENABLED");
 export async function routeMessage({ message }) {
   const msg = String(message || "").trim();
   if (!msg) throw new ApiError(400, "message is required");
+  console.log("[router] routeByRules loaded version = COUNT_PO_ENABLED");
 
   const rule = routeByRules(msg);
 
@@ -136,18 +141,152 @@ export async function routeMessage({ message }) {
   validateRoute(merged);
   return merged;
 }
+// ------------------- TODAY/YESTERDAY /7 DAYS OR ANY DATE -------------------
+
+function rangeLastNDaysUTC(n) {
+  const now = new Date();
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const from = addDaysUTC(to, -(n - 1)); // include today
+  return { docDateFrom: isoUTCDateOnly(from), docDateTo: isoUTCDateOnly(to) };
+}
+// ------------------- POITEMS ON PARTICULAR PO NUMBER -------------------
+
+function extractPoItemNumber(message) {
+  const m = String(message || "").toLowerCase();
+
+  const match = m.match(
+    /\b(po\s*item|item|line\s*item|line)\s*[:#\-()]?\s*(\d{1,5})\b/i
+  );
+
+  const raw = match?.[2];
+  if (!raw) return null;
+
+  const digits = String(raw).replace(/\D/g, "");
+  if (!digits) return null;
+
+  return digits.padStart(5, "0");
+}
+
+
 
 // ------------------- RULE-BASED -------------------
 function routeByRules(message) {
-  const m = message.toLowerCase();
+  const m = String(message || "").toLowerCase();
 
   const id = extractDocNumber(message);
-  const filters = extractListFilters(message);
+  let filters = extractListFilters(message);
+
+  // ✅ Set created-date field only for "created" questions
+  if (/\b(created|were\s+created|created\s+on|created\s+date)\b/.test(m)) {
+    filters = { ...(filters || {}), dateField: "CREATED_ON" };
+
+  }
+  // ✅ COUNT items in a specific PO (must be before COUNT_PO)
+  if (
+    id &&
+    /\b(how\s+many|count|number\s+of)\b/.test(m) &&
+    /\b(items?|line\s*items?)\b/.test(m)
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "COUNT_PO_ITEMS", id, filters: null },
+    };
+  }
+  // ✅ List POs by company code
+  if (/\b(list|show)\b/.test(m) && /\b(po|pos|purchase\s*orders?)\b/.test(m) && /\bcompany\s*code\b/.test(m)) {
+    const companyCodeMatch = m.match(/\bcompany\s*code\s*(?:is|=)?\s*(\d{3,4})\b/);
+    const companyCode = companyCodeMatch ? companyCodeMatch[1] : null;
+
+    if (companyCode) {
+      return {
+        confident: true,
+        route: {
+          entity: "PO",
+          intent: "SHOW_PO",
+          id: null,
+          filters: { companyCode }, // ✅
+        },
+      };
+    }
+  }
+  // ✅ COUNT must come early so it isn't shadowed by list rules
+  if (
+    /\b(how\s+many|count|number\s+of)\b/.test(m) &&
+    (/\bpo(s)?\b/.test(m) || /\bpurchase\s*orders?\b/.test(m))
+  ) {
+    console.log("[router] COUNT_PO RULE HIT", message);
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "COUNT_PO", id: null, filters: filters || null },
+    };
+  }
+
+  // ✅ PRICING / NET PRICE (optionally by item number)
+  // Put this BEFORE measures so "pricing details" doesn't get misrouted.
+  if (id && /\b(pricing\s*details?|pricing|net\s*price|price\s*unit|price\s*info|currency|conditions?)\b/.test(m)) {
+    const poItem = extractPoItemNumber(message);
+    const pricingFilters = poItem ? { poItem } : null;
+
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PRICING", id, filters: pricingFilters },
+    };
+  }
+  if (id && /\b(pricing\s*procedure|procedure)\b/.test(m)) {
+    return { confident: true, route: { entity:"PO", intent:"SHOW_PO_PRICING_PROCEDURE", id, filters:null } };
+  }
+  // ✅ PR number + PR item related to a PO
+  if (id && /\b(purchase\s*requisition|requisition|pr\b|pr\s*(number|no)?|pr\s*item)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PR_ONLY", id, filters: null },
+    };
+  }
+
+  // ✅ WEIGHTS / VOLUME / VOLUME UNIT / MATERIAL TYPE (per PO item)
+  if (
+    /\b(net\s*weight|gross\s*weight|brgew|ntgew|volume\s*unit|vol\s*unit|volunit|volume|volum|material\s*type|mat\s*type|mattype)\b/.test(m)
+  ) {
+    const poNo = extractDocNumber(message);
+    if (!poNo) return { confident: false, route: null };
+
+    const fields = extractMeasureFields(message);
+    const poItem = extractPoItemNumber(message);
+
+    // ✅ If it matched this rule but we couldn't extract any specific field,
+    // default to MAT_TYPE (safer than returning EVERYTHING)
+    const finalFields = fields.length ? fields : ["MAT_TYPE"];
+
+    const measureFilters = {
+      ...(poItem ? { poItem } : null),
+      fields: finalFields,
+    };
+
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_MEASURES", id: poNo, filters: measureFilters },
+    };
+  }
+  // ✅ TAX CODE / Tax on sales/purchases
+  if (
+    id &&
+    /\b(tax\s*code|tax\s+on\s+sales\/purchases(\s+code)?|sales\/purchases\s+code|purchases?\s+code|purchase\s+code|purchase\s+tax|sales\s+tax)\b/i.test(m)
+  ) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_TAX_CODE", id, filters: null },
+    };
+  }
+
+  // ✅ PROFIT CENTER
+  if (id && /\b(profit\s*center|profit\s*centre)\b/.test(m)) {
+    return {
+      confident: true,
+      route: { entity: "PO", intent: "SHOW_PO_PROFIT_CENTER", id, filters: null },
+    };
+  }
 
   // ✅ PO LIST by relative date (today/yesterday/last week) + optional user
-  // Examples:
-  // - "Give the details of PO created today"
-  // - "Give me the list of PO created by user IRAM today"
   if (
     !id &&
     /\b(po|purchase\s*order|purchase\s*orders)\b/.test(m) &&
@@ -160,7 +299,6 @@ function routeByRules(message) {
     else if (/\byesterday\b/.test(m)) dateRange = rangeYesterdayUTC();
     else if (/\blast\s+week\b/.test(m)) dateRange = rangeLast7DaysUTC();
 
-    // support "created by user IRAM today" OR "user IRAM today"
     const createdByMatch =
       message.match(/\bcreated\s+by\s+user\s+([a-zA-Z0-9_]+)/i) ||
       message.match(/\bcreated\s+by\s+([a-zA-Z0-9_]+)/i) ||
@@ -220,7 +358,7 @@ function routeByRules(message) {
     };
   }
 
-  // ✅ PURCHASE DOCUMENT TYPE (BSART / PoDocType)
+  // ��� PURCHASE DOCUMENT TYPE (BSART / PoDocType)
   if (
     id &&
     /\b(purchase\s+document\s+type|purchase\s+doc\s+type|po\s*doc\s*type|document\s+type|doc\s*type|doctype|bsart)\b/.test(
@@ -312,7 +450,25 @@ function routeByRules(message) {
       route: { entity: "PO", intent: "SHOW_PO_PURCH_GROUP", id },
     };
   }
+  
+    // ✅ PO ITEM DETAILS (single item)
+  if (/\b(details?\s+of\s+(po\s*)?item|item\s+details?|material\s+details?\s+of\s+item)\b/.test(m)) {
+    const poNo = extractDocNumber(message);
+    if (!poNo) return { confident: false, route: null };
 
+    const poItem = extractPoItemNumber(message);
+    if (!poItem) return { confident: false, route: null };
+
+    return {
+      confident: true,
+      route: {
+        entity: "PO",
+        intent: "SHOW_PO_ITEM_DETAILS",   // ✅ use the single-item intent
+        id: poNo,
+        filters: { poItem },
+      },
+    };
+  }
   // ✅ DETAILS (+ common misspellings)
   if (id && /\b(detail|details|detials|deteils|detailes|full|complete|entire)\b/.test(m)) {
     return {
@@ -400,6 +556,8 @@ function routeByRules(message) {
     return { confident: true, route: { entity: "PO", intent: "DELIVERY_INFO", id } };
   }
 
+  
+
   return {
     confident: false,
     route: { entity: "PO", intent: "SHOW_PO", id: null, filters },
@@ -413,10 +571,45 @@ function extractDocNumber(message) {
   const any = message.match(/\b\d{6,12}\b/);
   return any ? any[0] : null;
 }
+// ------------------- VOLUME GROSS WEIGHT AND OTHERS -------------------
+function extractMeasureFields(message) {
+  const m = String(message || "").toLowerCase();
+  const fields = new Set();
+
+  const askedMatType = /\b(material\s*type|mat\s*type|mattype)\b/.test(m);
+  const askedNet = /\b(net\s*weight|ntgew)\b/.test(m);
+  const askedGross = /\b(gross\s*weight|brgew)\b/.test(m);
+  const askedVolUnit = /\b(volume\s*unit|vol\s*unit|volunit)\b/.test(m);
+  const askedVolume = /\b(volume|volum)\b/.test(m);
+  const askedWeightGeneric = /\bweights?\b/.test(m);
+
+  if (askedMatType) fields.add("MAT_TYPE");
+  if (askedNet) fields.add("NET_WEIGHT");
+  if (askedGross) fields.add("GROSS_WEIGHT");
+
+  if (askedVolUnit) fields.add("VOL_UNIT");
+  else if (askedVolume) fields.add("VOLUME");
+
+  if (askedWeightGeneric && !askedNet && !askedGross) {
+    fields.add("NET_WEIGHT");
+    fields.add("GROSS_WEIGHT");
+  }
+
+  return [...fields];
+}
 
 function extractListFilters(message) {
   const m = String(message || "").toLowerCase();
   const filters = {};
+
+  // ✅ "last N days" (e.g., last 2 days, last 15 days)
+  const lastNDays = m.match(/\blast\s+(\d+)\s+days?\b/);
+  if (lastNDays?.[1]) {
+    const n = Number(lastNDays[1]);
+    if (Number.isFinite(n) && n > 0 && n <= 365) { // cap to avoid crazy queries
+      Object.assign(filters, rangeLastNDaysUTC(n));
+    }
+  }
 
   // ✅ relative date filters
   if (/\btoday\b/.test(m)) {
@@ -445,28 +638,42 @@ function extractListFilters(message) {
     filters.docDateTo = toYyyyMmDd(end);
   }
 
-  const my = parseMonthYearFromText(message);
-  if (my) {
-    const { month, year } = my;
 
-    if (month && year) {
-      const { start, end } = monthStartEndUTC(year, month);
-      filters.docDateFrom = toYyyyMmDd(start);
-      filters.docDateTo = toYyyyMmDd(end);
-    } else if (month && !year) {
-      filters.monthOnly = month;
-    } else if (!month && year) {
-      const start = new Date(Date.UTC(year, 0, 1));
-      const end = new Date(Date.UTC(year, 11, 31, 23, 59, 59));
-      filters.docDateFrom = toYyyyMmDd(start);
-      filters.docDateTo = toYyyyMmDd(end);
+  // ✅ single explicit ISO date like 2025-12-03 (treat as one-day range)
+  const singleIso = message.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (singleIso?.[1]) {
+    filters.docDateFrom = singleIso[1];
+    filters.docDateTo = singleIso[1];
+  }
+
+  // ✅ only if date NOT already set by singleIso / today / yesterday / last week / etc.
+  if (!filters.docDateFrom && !filters.docDateTo) {
+    const my = parseMonthYearFromText(message);
+    if (my) {
+      const { month, year } = my;
+
+      if (month && year) {
+        const { start, end } = monthStartEndUTC(year, month);
+        filters.docDateFrom = toYyyyMmDd(start);
+        filters.docDateTo = toYyyyMmDd(end);
+      } else if (month && !year) {
+        filters.monthOnly = month;
+      } else if (!month && year) {
+        const start = new Date(Date.UTC(year, 0, 1));
+        const end = new Date(Date.UTC(year, 11, 31, 23, 59, 59));
+        filters.docDateFrom = toYyyyMmDd(start);
+        filters.docDateTo = toYyyyMmDd(end);
+      }
     }
   }
 
-  const range = parseIsoDateRangeFromText(message);
-  if (range) {
-    filters.docDateFrom = toYyyyMmDd(range.start);
-    filters.docDateTo = toYyyyMmDd(range.end);
+  // ✅ only if date still NOT set (so it can’t override singleIso)
+  if (!filters.docDateFrom && !filters.docDateTo) {
+    const range = parseIsoDateRangeFromText(message);
+    if (range) {
+      filters.docDateFrom = toYyyyMmDd(range.start);
+      filters.docDateTo = toYyyyMmDd(range.end);
+    }
   }
 
   const createdBy =
@@ -552,7 +759,6 @@ async function routeWithOllama(message) {
     clearTimeout(timer);
   }
 }
-
 function buildPrompt(message) {
   return `
 Return ONLY JSON.
@@ -560,7 +766,7 @@ Return ONLY JSON.
 Schema:
 {
   "entity":"PO|PR|VENDOR",
-  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|SHOW_PO_COMPANY_CODE|SHOW_PO_DOC_TYPE|SHOW_PO_CURRENCY|SHOW_PO_EXCHANGE_RATE|SHOW_PO_PURCH_ORG|SHOW_PO_PURCH_GROUP|SHOW_PO_DOC_CATEGORY|SHOW_PO_SUPPLIER|SHOW_PO_PAYMENT_TERMS|SHOW_PO_DISCOUNT_DAYS|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO|SHOW_PO_MATERIALS|SHOW_PO_PLANTS|SHOW_PO_STORAGE_LOCATIONS|SHOW_PO_MATERIAL_GROUPS|SHOW_PO_QUANTITIES|SHOW_PO_ORDER_PRICE_UNITS",
+  "intent":"SHOW_PO|SHOW_PO_DETAILS|SHOW_PO_ITEMS|SHOW_PO_STATUS|SHOW_PO_PRICING|SHOW_PO_DELIVERY|SHOW_PO_VENDOR|SHOW_PO_COMPANY_CODE|SHOW_PO_DOC_TYPE|SHOW_PO_CURRENCY|SHOW_PO_EXCHANGE_RATE|SHOW_PO_PURCH_ORG|SHOW_PO_PURCH_GROUP|SHOW_PO_DOC_CATEGORY|SHOW_PO_SUPPLIER|SHOW_PO_PAYMENT_TERMS|SHOW_PO_DISCOUNT_DAYS|CREATED_BY|CREATED_DATE|PRICE_INFO|DELIVERY_INFO|VENDOR_INFO|SHOW_PO_MATERIALS|SHOW_PO_PLANTS|SHOW_PO_STORAGE_LOCATIONS|SHOW_PO_MATERIAL_GROUPS|SHOW_PO_QUANTITIES|SHOW_PO_ORDER_PRICE_UNITS|COUNT_PO|SHOW_PO_MEASURES|SHOW_PO_PR_ONLY",
   "id":"string or null",
   "filters":{...} or null
 }
@@ -571,6 +777,7 @@ Rules:
 - Prefer narrow intents (company code/vendor/status/items/pricing/delivery) when asked; otherwise SHOW_PO_DETAILS.
 - If no id, SHOW_PO (list).
 - If user asks for created today/yesterday/last week, use SHOW_PO with filters.
+- If user asks "how many POs...", use COUNT_PO.
 
 User message:
 ${JSON.stringify(message)}
@@ -597,7 +804,7 @@ function validateRoute(route) {
   if (!ALLOWED_INTENTS.includes(route.intent)) {
     throw new ApiError(400, "Unsupported intent.");
   }
-  if (route.intent !== "SHOW_PO" && !route.id) {
+  if (!["SHOW_PO", "COUNT_PO"].includes(route.intent) && !route.id) {
     throw new ApiError(400, "Document number missing.");
   }
 }

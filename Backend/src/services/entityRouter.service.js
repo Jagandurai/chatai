@@ -14,27 +14,42 @@ export const entityRouterService = {
     if (!entry) throw new ApiError(400, `Unsupported entity: ${entity}`);
 
     const intentDef = entry.intents[i];
-    if (!intentDef) throw new ApiError(400, `Unsupported intent "${intent}" for entity "${entity}".`);
+    if (!intentDef)
+      throw new ApiError(
+        400,
+        `Unsupported intent "${intent}" for entity "${entity}".`
+      );
 
     // LIST mode does not require id
-    if (intentDef.mode !== "LIST" && !id) {
-      throw new ApiError(400, `id is required for intent "${intent}" (entity "${entity}").`);
+    const requiresId =
+      typeof intentDef.requiresId === "boolean"
+        ? intentDef.requiresId
+        : intentDef.mode !== "LIST"; // default: LIST=false, others=true
+
+    if (requiresId && !id) {
+      throw new ApiError(
+        400,
+        `id is required for intent "${intent}" (entity "${entity}").`
+      );
     }
 
     // Fetch raw XML (pass filters down)
     const xml = await entry.service.fetch({ id, intent: i, filters });
 
     // Transform to structured JSON (pass filters down)
-    const structured = await entry.transformer.transform({ xml, id, intent: i, filters });
+    const structured = await entry.transformer.transform({
+      xml,
+      id,
+      intent: i,
+      filters,
+    });
 
     // Extract only when needed
     let data = null;
-
     if (intentDef.mode === "FIELD") {
       const paths = resolveIntentPaths(intentDef);
       data = pickPaths(structured, paths);
     }
-    // Format response
 
     // ✅ LIST → table/list
     if (intentDef.mode === "LIST") {
@@ -43,10 +58,18 @@ export const entityRouterService = {
         intent: i,
         filters: filters || null,
         data: formatList({ entity: e, intent: i, structured }),
+        // optional, but helps UI: provide a readable reply
+        reply: formatOneLine({
+          entity: e,
+          intent: i,
+          id,
+          data: structured,
+          intentDef,
+        }),
       };
     }
 
-    // ✅ FIELD → one-line answer (who created, price, etc.)
+    // ✅ FIELD → one-line answer
     if (intentDef.mode === "FIELD") {
       return {
         entity: e,
@@ -57,16 +80,31 @@ export const entityRouterService = {
       };
     }
 
-    // ✅ DETAIL → full structured response (NO one-line)
+    // ✅ DETAIL → full structured response
+    // Only include "reply" if a template exists for this intent.
     if (intentDef.mode === "DETAIL") {
+      const hasTemplate = typeof intentDef.template === "function";
+
       return {
         entity: e,
         intent: i,
         filters: filters || null,
-        data: structured, // 🔥 IMPORTANT: return full structured data
+        data: structured,
+        ...(hasTemplate
+          ? {
+              reply: formatOneLine({
+                entity: e,
+                intent: i,
+                id,
+                data: structured,
+                intentDef,
+              }),
+            }
+          : {}),
       };
     }
 
+    // fallback
     return {
       entity: e,
       intent: i,
